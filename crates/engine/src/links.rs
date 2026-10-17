@@ -3,11 +3,11 @@
 
 pub const APP_NAME: &str = "EffectCraft";
 pub const APP_SLUG: &str = "effectcraft";
-pub const DISCORD: &str = "https://discord.gg/artcraft";
-pub const WEBSITE: &str = "https://getartcraft.com";
-pub const APP_PAGE: &str = "https://getartcraft.com/apps/effectcraft";
-pub const GITHUB: &str = "https://github.com/storytold/effectcraft";
-pub const ISSUES: &str = "https://github.com/storytold/effectcraft/issues";
+pub const DISCORD: &str = "https://discord.gg/officetools";
+pub const WEBSITE: &str = "https://officetools.yosuaf.com";
+pub const APP_PAGE: &str = "https://officetools.yosuaf.com/effectcraft";
+pub const GITHUB: &str = "https://github.com/fyosua/officetools-effectcraft";
+pub const ISSUES: &str = "https://github.com/fyosua/officetools-effectcraft/issues";
 
 /// Sibling apps of the ArtCraft family: (name, what it is, GitHub repo, app page).
 pub const SIBLINGS: &[(&str, &str)] = &[
@@ -23,5 +23,5 @@ pub fn github_of(slug: &str) -> String {
     format!("https://github.com/storytold/{slug}")
 }
 pub fn page_of(slug: &str) -> String {
-    format!("https://getartcraft.com/apps/{slug}")
+    format!("https://officetools.yosuaf.com/apps/{slug}")
 }
