@@ -2,41 +2,125 @@ name: Release
 
 on:
   push:
-    branches: [release]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version override for a test run, e.g. 0.2.0-rc.1 (empty: Cargo.toml)"
-        type: string
+      tag:
+        description: "Release tag, e.g. v0.8.0 (empty: uses Cargo.toml version via latest commit tag)"
         default: ""
 
 permissions:
   contents: write
 
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  release:
-    # Intentionally tracked at @main (not SHA-pinned) so org-wide CI improvements, security fixes, and build optimizations propagate without PR churn across all craftapp repos.
-    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
-    with:
-      app-name: effectcraft
-      app-title: EffectCraft
-      version: ${{ inputs.version }}
-    secrets:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-      AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
-      AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
-      AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-14]
+        include:
+          - os: ubuntu-22.04
+            artifact: linux-x64
+          - os: windows-latest
+            artifact: windows-x64
+          - os: macos-14
+            artifact: macos-arm64
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+
+      - name: Build (main app + CLI)
+        shell: bash
+        run: |
+          set -e
+          # discover app name: a Cargo package whose dir matches apps/<name>
+          APP=""
+          for d in apps/*/; do
+            b=$(basename "$d")
+            if [ -f "$d/Cargo.toml" ] && grep -q "^name = \"$b\"" "$d/Cargo.toml" 2>/dev/null; then
+              # prefer the one that also has a -cli sibling
+              [ -d "apps/$b-cli" ] && APP="$b" && break
+            fi
+          done
+          [ -n "$APP" ] || APP=$(ls apps | grep -v -E '\.(service|timer)$' | head -1)
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          echo "Building app: $APP"
+          PKGS="-p $APP"
+          [ -d "apps/$APP-cli" ] && PKGS="$PKGS -p $APP-cli"
+          cargo build --release $PKGS
+
+      - name: Package artifacts
+        id: package
+        shell: bash
+        run: |
+          set -e
+          ROOT="$PWD"
+          APP="${{ env.APP }}"
+          OS="${{ matrix.artifact }}"
+          VER="${GITHUB_REF_NAME#v}"
+          STAGE="$ROOT/dist/office-$APP-$VER-$OS"
+          mkdir -p "$STAGE"
+          for b in "$ROOT"/target/release/$APP "$ROOT"/target/release/$APP-cli; do
+            if [ -f "$b" ] || [ -f "$b.exe" ]; then
+              cp "$b.exe" "$b" 2>/dev/null || cp "$b" "$STAGE/" 2>/dev/null || true
+            fi
+          done
+          cp -r "$STAGE" . 2>/dev/null || true
+          # archive
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -Command "Compress-Archive -Path '$STAGE/*' -DestinationPath '$ROOT/office-$APP-$VER-$OS.zip' -Force"
+          else
+            tar -C "$STAGE" -czf "$ROOT/office-$APP-$VER-$OS.tar.gz" .
+          fi
+          ls -la "$ROOT" | grep 'office-.*-\(tar.gz\|zip\)' || true
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: office-*.tar.gz
+          if-no-files-found: error
+
+      - name: Release notes / attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          # Only create/attach from the Linux job to avoid triple-create races
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            gh release create "$TAG" office-*.tar.gz --generate-notes --repo "$GITHUB_REPOSITORY" 2>/dev/null || \
+            gh release upload "$TAG" office-*.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release upload "$TAG" office-*.tar.gz --clobber --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          fi
+
+  # Aggregate all OS archives into one release
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Attach all platform archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -print0 | \
+            xargs -0 -r gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" | head -20
